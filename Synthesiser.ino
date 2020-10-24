@@ -5,9 +5,13 @@
 #define sbi(sfr, bit) (_SFR_BYTE(sfr) |= _BV(bit))
 
 #define recordMemStart 8*18*4
-#define modOffset controlValues[26]
-#define modScale controlValues[27]
+//#define modOffset controlValues[26]
+#define modScale controlValues[17]
 #define modFrequency controlValues[1]
+#define doubleOscDetune controlValues[18]
+#define fineDetune controlValues[10]
+#define volumeWheel controlValues[7]
+#define sustain1 controlValues[91]
 
 __attribute__((optimize("O0")))
 
@@ -78,8 +82,10 @@ float modPhase = 0;  // the phase of the mod wheel oscillation. Doesn't need to 
 float modAmp = 0;  // amplitude of the mod wheel oscillation, updated by the interrupt but the oscillator amplitudes are controlled in the main loop
 
 void setup() {
-  modOffset = 127;
-  modScale = 0;
+  modScale = 27;
+  volumeWheel = 127;
+  sustain1 = 127;
+  
   sbi(ADCSRA, ADPS2);
   cbi(ADCSRA, ADPS1);
   cbi(ADCSRA, ADPS0);
@@ -220,7 +226,7 @@ void loop() {
   long currentMicros = micros();
   long attack1 = controlValues[74]; // patch one knobs
   long decay1 = controlValues[71];
-  byte sustain1 = controlValues[91];
+  //byte sustain1 = sustain1; // defined in header
   long release1 = controlValues[93];
   //   long attack2 = controlValues[73];
   //   long decay2 = controlValues[72];
@@ -239,6 +245,9 @@ void loop() {
     if (activeNotes[i] != -1) {
       // Frequency correcting to pitch wheel (maybe fm synthesis):
       float freq = 440 * (pow(2, (float(activeNotes[i]) + ((pitchbend - 64.0) / 32) - 69.0) / 12.0));
+      if (doubleOscDetune != 0 && i > 3) {
+        freq *= (1 + ((float(doubleOscDetune) - 1)/126))*(1 + (float(fineDetune)/2135.8));
+      }
       if (abs((freq - freqs[i]) / freq) > 0.004) {  // if significant change has occurred
         //          Serial.print("Updating freq of note ");
         //          Serial.print(i);
@@ -289,8 +298,10 @@ void loop() {
         }
       }
       velocity *= 2;
-      float tmp = float(velocity) * ((float(modOffset) + modAmp*float(modScale))/127.0);
-      velocity = byte(max(min(tmp, 255), 0));
+      if (modFrequency != 0) {
+        float tmp = float(velocity) * (1 + ((modAmp - 1)*float(modScale)/255));
+        velocity = byte(max(min(tmp, 255), 0));
+      }
       if (abs(velocity - lastVelocities[i]) > 2) { // if significant change:
         writeOscillatorAmp(i, amplitudeMapping(i, velocity));
         lastVelocities[i] = velocity;
@@ -458,60 +469,17 @@ void changeNote() {
     Serial.print(newData1);
     Serial.print("\t");
     Serial.println(newData2);
-    float freq = 440 * (pow(2, (float(newData1) - 69.0) / 12.0));
-    int oscillatorNum = -1;
-    bool replacedOsc = false;
-    for (int i = 0; i < 8; i++) { //Check if oscillator with no use exists or one already in release of the same note
-      if ((activeNotes[i] == -1 && maxFreqs[i] >= freq) || activeNotes[i] == newData1) {
-        oscillatorNum = i;
-        break;
-      }
-    }
-    if (oscillatorNum == -1) { // haven't found an oscillator yet
-      long oldestUpdate = 1e10;
-      for (int i = 0; i < 8; i++) { //Check if oscillator which is in release time exists, and pick the oldest if so
-        if (activeVelocities[i] == 0  && maxFreqs[i] >= freq) {
-          if (releaseTimes[i] < oldestUpdate) {
-            replacedOsc = true;
-            oldestUpdate = releaseTimes[i];
-            oscillatorNum = i;
-          }
-        }
-      }
-    }
-    if (oscillatorNum == -1) { // still haven't found an oscillator
-      long oldestUpdate = 1e10;
-      for (int i = 0; i < 8; i++) { //Choose oldest oscillator
-        if (lastUpdated[i] < oldestUpdate  && maxFreqs[i] >= freq) {
-          replacedOsc = true;
-          oldestUpdate = lastUpdated[i];
-          oscillatorNum = i;
-        }
-      }
-    }
-    if (replacedOsc) {// oscillator in use has been replaced, if possible copy all data onto an unused oscillator (which couldn't initially have been used as it was outside the frequency range of needed note)
-      int replacedNote = -1;
-      freq = 440 * (pow(2, (float(activeNotes[oscillatorNum]) - 69.0) / 12.0));
-      for (int i = 0; i < 8; i++) { //Check if oscillator with no use exists or one already in release of the same note
-        if ((activeNotes[i] == -1 && maxFreqs[i] >= freq)) {
-          replacedNote = i;
-          break;
-        }
-      }
-      if (replacedNote != -1) { // found suitable replacement which wasn't being used
-        activeVelocities[replacedNote] = activeVelocities[oscillatorNum];
-        lastUpdated[replacedNote] = lastUpdated[oscillatorNum];
-        activeNotes[replacedNote] = activeNotes[oscillatorNum];
-        if ((notePressed & 1 << oscillatorNum) > 0) {
-          notePressed = notePressed | 1 << replacedNote;
-        }
-      }
-    }
-    if (oscillatorNum != -1) {
-      lastUpdated[oscillatorNum] = micros();
-      activeVelocities[oscillatorNum] = controlValues[7] + float(1.0 - controlValues[7] / 127.0) * newData2;
-      activeNotes[oscillatorNum] = newData1;
-      notePressed = notePressed | 1 << oscillatorNum;
+    
+    if (doubleOscDetune == 0) {
+      float freq = 440 * (pow(2, (float(newData1) - 69.0) / 12.0));
+      int possibleOsc[] = {0, 1, 2, 3, 4, 5, 6, 7};
+      assignOscillator(freq, possibleOsc, 8);
+    } else {
+      float freq = 440 * (pow(2, (float(newData1) - 69.0) / 12.0));
+      int possibleOsc1[] = {0, 1, 2, 3};
+      assignOscillator(freq, possibleOsc1, 4);
+      int possibleOsc2[] = {4, 5, 6, 7};
+      assignOscillator(freq, possibleOsc2, 4);
     }
   }
   else if (newData2 == 0) { // Note has been released
@@ -522,15 +490,12 @@ void changeNote() {
     for (int i = 0; i < 8; i++) { //Find oscillator which was being used (but it may have been overwritten)
       if (activeNotes[i] == newData1) {
         oscillatorNum = i;
-        break;
+        //activeVelocities[oscillatorNum] *= -1;
+        notePressed = notePressed - (1 << oscillatorNum);
+        //writeOscillatorFreq(oscillatorNum,0);
+        //writeOscillatorAmp(oscillatorNum,255);
+        releaseTimes[oscillatorNum] = micros();
       }
-    }
-    if (oscillatorNum != -1) {
-      //activeVelocities[oscillatorNum] *= -1;
-      notePressed = notePressed - (1 << oscillatorNum);
-      //writeOscillatorFreq(oscillatorNum,0);
-      //writeOscillatorAmp(oscillatorNum,255);
-      releaseTimes[oscillatorNum] = micros();
     }
   }
   else { // MIDI command not yet fully received
@@ -551,6 +516,67 @@ void changeNote() {
       n++;
     }
   }
+}
+
+void assignOscillator(float freq, int possibleOscillators[], int numberOscillators) {
+    int oscillatorNum = -1;
+    bool replacedOsc = false;
+    for (int j = 0; j < numberOscillators; j++) { //Check if oscillator with no use exists or one already in release of the same note
+      int i = possibleOscillators[j];
+      if ((activeNotes[i] == -1 && maxFreqs[i] >= freq) || activeNotes[i] == newData1) {
+        oscillatorNum = i;
+        break;
+      }
+    }
+    if (oscillatorNum == -1) { // haven't found an oscillator yet
+      long oldestUpdate = 1e10;
+      for (int j = 0; j < numberOscillators; j++) { //Check if oscillator which is in release time exists, and pick the oldest if so
+        int i = possibleOscillators[j];
+        if (activeVelocities[i] == 0  && maxFreqs[i] >= freq) {
+          if (releaseTimes[i] < oldestUpdate) {
+            replacedOsc = true;
+            oldestUpdate = releaseTimes[i];
+            oscillatorNum = i;
+          }
+        }
+      }
+    }
+    if (oscillatorNum == -1) { // still haven't found an oscillator
+      long oldestUpdate = 1e10;
+      for (int j = 0; j < numberOscillators; j++) { //Choose oldest oscillator
+        int i = possibleOscillators[j];
+        if (lastUpdated[i] < oldestUpdate  && maxFreqs[i] >= freq) {
+          replacedOsc = true;
+          oldestUpdate = lastUpdated[i];
+          oscillatorNum = i;
+        }
+      }
+    }
+    if (replacedOsc) {// oscillator in use has been replaced, if possible copy all data onto an unused oscillator (which couldn't initially have been used as it was outside the frequency range of needed note)
+      int replacedNote = -1;
+      freq = 440 * (pow(2, (float(activeNotes[oscillatorNum]) - 69.0) / 12.0));
+      for (int j = 0; j < numberOscillators; j++) { //Check if oscillator with no use exists or one already in release of the same note
+        int i = possibleOscillators[j];
+        if ((activeNotes[i] == -1 && maxFreqs[i] >= freq)) {
+          replacedNote = i;
+          break;
+        }
+      }
+      if (replacedNote != -1) { // found suitable replacement which wasn't being used
+        activeVelocities[replacedNote] = activeVelocities[oscillatorNum];
+        lastUpdated[replacedNote] = lastUpdated[oscillatorNum];
+        activeNotes[replacedNote] = activeNotes[oscillatorNum];
+        if ((notePressed & 1 << oscillatorNum) > 0) {
+          notePressed = notePressed | 1 << replacedNote;
+        }
+      }
+    }
+    if (oscillatorNum != -1) {
+      lastUpdated[oscillatorNum] = micros();
+      activeVelocities[oscillatorNum] = volumeWheel + float(1.0 - volumeWheel / 127.0) * newData2;
+      activeNotes[oscillatorNum] = newData1;
+      notePressed = notePressed | 1 << oscillatorNum;
+    }
 }
 
 void autotune() {
