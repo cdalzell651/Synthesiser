@@ -12,6 +12,9 @@
 #define fineDetune controlValues[10]
 #define volumeWheel controlValues[7]
 #define sustain1 controlValues[91]
+#define fmAmplitude controlValues[26]
+#define fmCourseScale controlValues[27]
+#define fmFineScale controlValues[28]
 
 __attribute__((optimize("O0")))
 
@@ -81,10 +84,13 @@ byte pitchbend = 64;
 float modPhase = 0;  // the phase of the mod wheel oscillation. Doesn't need to stay within 2*pi, and is updated by the interrupt
 float modAmp = 0;  // amplitude of the mod wheel oscillation, updated by the interrupt but the oscillator amplitudes are controlled in the main loop
 
+float fmPhase = 0; // phase relative to 1 Hz
+
 void setup() {
-  modScale = 27;
+  modScale = 60;
   volumeWheel = 127;
   sustain1 = 127;
+  fmCourseScale = 32;
   
   sbi(ADCSRA, ADPS2);
   cbi(ADCSRA, ADPS1);
@@ -245,8 +251,13 @@ void loop() {
     if (activeNotes[i] != -1) {
       // Frequency correcting to pitch wheel (maybe fm synthesis):
       float freq = 440 * (pow(2, (float(activeNotes[i]) + ((pitchbend - 64.0) / 32) - 69.0) / 12.0));
-      if (doubleOscDetune != 0 && i > 3) {
+      if (doubleOscDetune != 0 && i > 3) {  // amplitude modulation
         freq *= (1 + ((float(doubleOscDetune) - 1)/126))*(1 + (float(fineDetune)/2135.8));
+      }
+      if (fmAmplitude != 0) { // frequency modulation
+        float fmfreq = freq/(fmCourseScale + 1 + (fmFineScale*0.008));
+        float fmAmp = fast_sine(fmPhase * fmfreq);
+        freq *= (1 + (float(fmAmplitude) * fmAmp * 0.0008));
       }
       if (abs((freq - freqs[i]) / freq) > 0.004) {  // if significant change has occurred
         //          Serial.print("Updating freq of note ");
@@ -815,4 +826,5 @@ ISR(TIMER2_COMPA_vect) { // interrupt on timer 2 (currently approximately 2 kHz 
     float frequency = (modFreq*modFreq)/800;
     modPhase = modPhase + frequency*0.00314159; // assuming 2 kHz update frequency
     modAmp = fast_sine(modPhase);
+    fmPhase = fmPhase + 0.00314159; // assuming 2 kHz update frequency
 }
